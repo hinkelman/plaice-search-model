@@ -402,109 +402,6 @@ to test-random-draws
   csv:to-file "InputData/TurnAngleTest.csv" ta
   print "done"
 end
-
-;; wasted a bunch of time re-inventing the wheel to try to use geometry to make predators reflect at boundaries
-;; ended up with verbose code that never fully solved the problem
-;; finally conceded my failure and wrote a much shorter version in idiomatic NetLogo code
-;; putting some of the silly code down here as a record of my stupidity for the first git commit
-
-;to-report point-ahead [x1 y1 head dist]
-;  let x2 x1 + dist * sin head
-;  let y2 y1 + dist * cos head
-;  report (list x2 y2)
-;end
-
-;to-report slope-intercept [x1 y1 x2 y2]
-;  ;; only returns slope and intercept for "sloped" line
-;  let diff-x x2 - x1
-;  if (diff-x = 0) [ report (list "vertical" x1) ]
-;  let diff-y y2 - y1
-;  if (diff-y = 0) [ report (list "horizontal" y1) ]
-;  let m diff-y / diff-x
-;  let b y1 - (m * x1)
-;  report (list "sloped" m b)
-;end
-
-;to-report point-distance  [x1 y1 x2 y2]
-;  report sqrt ( (x2 - x1) ^ 2 + (y2 - y1) ^ 2)
-;end
-
-;to-report check-point [xy]                                                     ; check if point is inside of world
-;  let x item 0 xy
-;  let y item 1 xy
-;  let out true
-;  if (x < (min-pxcor + 1) or y < (min-pycor + 1) or x > (max-pxcor - 1) or y > (max-pycor - 1)) [ set out false ]
-;  report out
-;end
-
-;to-report check-region [xy]
-;  if (check-point xy) [ error "New point is inside boundary, i.e., no intersection with boundary."]
-;  let x item 0 xy
-;  let y item 1 xy
-;
-;  if (y < min-pycor and x < min-pxcor) [ report "bottom-left" ]
-;  if (y < min-pycor and x > max-pxcor) [ report "bottom-right"]
-;  if (y > max-pycor and x < min-pxcor) [ report "top-left"    ]
-;  if (y > max-pycor and x > max-pxcor) [ report "top-right"   ]
-;
-;  if (x < min-pxcor and y >= min-pycor and y <= max-pycor) [ report "left"  ]
-;  if (x > max-pxcor and y >= min-pycor and y <= max-pycor) [ report "right" ]
-;  if (y < min-pycor and x >= min-pxcor and x <= max-pxcor) [ report "bottom"]
-;  if (y > max-pycor and x >= min-pxcor and x <= max-pxcor) [ report "top"   ]
-;end
-
-;to-report find-boundary-point [region si]  ;; si = slope-intercept
-;  ;; I'm pretty sure that I'm forgetting some key geometry facts that would make this reporter more general and more robust
-;  ;; moving forward for now...
-;
-;  let line-type item 0 si
-;
-;  if (line-type = "vertical")[
-;    let x item 1 si
-;    if (region = "top") [report (list x max-pycor)]
-;    if (region = "bottom") [report (list x min-pycor)]
-;  ]
-;
-;  if (line-type = "horizontal")[
-;    let y item 1 si
-;    if (region = "right") [report (list max-pxcor y)]
-;    if (region = "left") [report (list min-pxcor y)]
-;  ]
-;
-;  if (line-type = "sloped")[
-;    let m item 1 si                  ;; slope
-;    let b item 2 si                  ;; intercept
-;
-;    ;; values based on re-arranging y = mx + b, i.e., given slope, intercept, and x,y-coordinates of next point, find intersection points with the 4 lines that comprise the world
-;    let left-side  (list min-pxcor (min-pxcor * m + b))     ;; not simplified to make rearrangment explicit
-;    let right-side (list max-pxcor (max-pxcor * m + b))
-;    let bottom (list ((min-pycor - b) / m) min-pycor)
-;    let top    (list ((max-pycor - b) / m) max-pycor)
-;
-;    if (region = "left")  [ report left-side ]
-;    if (region = "right") [ report right-side]
-;    if (region = "bottom")[ report bottom    ]
-;    if (region = "top")   [ report top       ]
-;
-;    if (region = "bottom-left") [
-;      ;; need to check if plausible exit point is on bottom or left; where plausible means that it is in the world
-;      if (check-point bottom)     [ report bottom ]
-;      if (check-point left-side)  [ report left-side ]
-;    ]
-;    if (region = "bottom-right") [
-;      if (check-point bottom)     [ report bottom ]
-;      if (check-point right-side) [ report right-side ]
-;    ]
-;    if (region = "top-left") [
-;      if (check-point top)        [ report top ]
-;      if (check-point left-side)  [ report left-side ]
-;    ]
-;    if (region = "top-right") [
-;      if (check-point top)        [ report top ]
-;      if (check-point right-side) [ report right-side ]
-;    ]
-;  ]
-;end
 @#$#@#$#@
 GRAPHICS-WINDOW
 220
@@ -627,7 +524,7 @@ prey-number
 prey-number
 1
 50
-50.0
+49.0
 1
 1
 NIL
@@ -665,7 +562,7 @@ SWITCH
 48
 use-scenario?
 use-scenario?
-1
+0
 1
 -1000
 
@@ -678,7 +575,7 @@ scenario
 scenario
 1
 26
-9.0
+26.0
 1
 1
 NIL
