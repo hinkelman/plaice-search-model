@@ -1,0 +1,1284 @@
+<?xml version="1.0" encoding="utf-8"?>
+<model version="NetLogo 7.0.4" snapToGrid="true">
+  <code><![CDATA[extensions [
+  csv
+  profiler
+]
+
+globals [
+  giving-up-time                                                       ; number of moves without a capture before predator switches back to extensive search
+  avg-local-density                                                    ; average number of prey expected in a circle of radius response-radius at start of simulation
+
+  detection-radius                                                     ; distance from which a predator can detect (and capture) prey item
+  wall-min                                                             ; lower edge of habitat (in both x and y)
+  wall-max                                                             ; upper edge of habitat (in both x and y)
+
+  move-lengths                                                         ; move length (cm = grid units) at each point of cumulative distribution
+  ml-extensive                                                         ; list of cumulative frequency for move lengths from extensive mode
+  ml-intensive                                                         ; list of cumulative frequency for move lengths from intensive mode
+
+  turn-angles                                                          ; turn angle (degrees) at each point of cumulative distribution
+  ta-extensive                                                         ; list of cumulative frequency for turn angles from extensive mode
+  ta-intensive                                                         ; list of cumulative frequency for turn angles from intensive mode
+]
+
+breed [ prey a-prey ]
+breed [ predators predator ]
+
+; predators can detect/capture prey within detection-radius; assume 100% capture probability
+predators-own [
+  search-mode
+  moves-since-capture                                                  ; number of moves since last prey capture
+  prey-captured
+]
+
+prey-own [
+  selected?                                                            ; prey randomly selected for simulation
+  present?                                                             ; set to false when prey consumed
+  regeneration-tick                                                    ; tick at which a consumed prey item reappears
+]
+
+;; SETUP ------------------------------------------------------------------------------------
+
+to setup
+  clear-all
+  if (use-scenario?)[ set-scenarios ]
+  set-globals
+  ask patches [ set pcolor 99 ]
+  set-boundary-patches
+  create-prey-grid
+  distribute-prey
+  add-predator
+  reset-ticks
+end
+
+to set-scenarios
+  let data csv:from-file "InputData/Scenarios.csv"
+  let header item 0 data
+  let sc item scenario data                                            ; row 0 is header so row index equals scenario number
+  set prey-patch-size item (position "PreyPatchSize" header) sc
+  set prey-spacing item (position "PreySpacing" header) sc
+  set prey-number item (position "PreyNumber" header) sc
+end
+
+to set-globals
+  set detection-radius 1
+  set giving-up-time 10
+  ;; habitat is a 70 x 70 square; patches 1-70 are habitat and the outer ring of patches is boundary
+  ;; prey sit on lattice points (integer coordinates) 1-70; habitat edges are at 0.5 and 70.5
+  set wall-min min-pxcor + 0.5
+  set wall-max max-pxcor - 0.5
+  set avg-local-density report-avg-local-density
+  set-move-lengths
+  set-turn-angles
+end
+
+to-report report-avg-local-density
+  ;; average number of prey that would fall within a circle of radius response-radius
+  report prey-number * (pi * response-radius ^ 2) / ((wall-max - wall-min) ^ 2)
+end
+
+to set-move-lengths
+  ;; reformat data into 3 separate lists (rather than nested lists) for use in calc-piecewise
+  let data butfirst csv:from-file "InputData/MoveLength.csv"           ; butfirst drops header row
+  set move-lengths map [ x -> item 0 x ] data
+  set ml-extensive clean-cdf map [ x -> item 1 x ] data
+  set ml-intensive clean-cdf map [ x -> item 2 x ] data
+end
+
+to set-turn-angles
+  ;; reformat data into 3 separate lists (rather than nested lists) for use in calc-piecewise
+  let data butfirst csv:from-file "InputData/TurnAngle.csv"            ; butfirst drops header row
+  set turn-angles map [ x -> item 0 x ] data
+  set ta-extensive clean-cdf map [ x -> item 1 x ] data
+  set ta-intensive clean-cdf map [ x -> item 2 x ] data
+end
+
+to-report clean-cdf [ cdf ]
+  ;; cumulative frequencies were digitized from Figs 1 and 2 of Hill et al. (2003)
+  ;; digitizing error produces small decreases and final values slightly > 1
+  ;; force the curve to be non-decreasing and rescale so that it ends at 1
+  let running-max 0
+  let out []
+  foreach cdf [ p ->
+    set running-max max list running-max p
+    set out lput running-max out
+  ]
+  report map [ p -> p / last out ] out
+end
+
+to set-boundary-patches
+  ask patches with [pxcor = min-pxcor or pxcor = max-pxcor or pycor = min-pycor or pycor = max-pycor][ set pcolor black ]
+end
+
+to create-prey-grid
+  ;; one potential prey item at each lattice point in a square patch at the center of the habitat
+  set-default-shape prey "dot"
+  let start 1 + floor ((max-pxcor - 1 - prey-patch-size) / 2)
+  let grid-pos n-values prey-patch-size [ i -> start + i ]
+  foreach grid-pos [ x ->
+    foreach grid-pos [ y ->
+      create-prey 1 [
+        setxy x y
+        set color 98
+        set size 0.5
+        set selected? false
+        set present? false
+        set regeneration-tick 0
+      ]
+    ]
+  ]
+end
+
+to distribute-prey
+  ;; randomly select prey-number lattice points subject to minimum spacing between prey;
+  ;; candidates closer than or equal to prey-spacing from an already selected prey are excluded
+  repeat prey-number [
+    let chosen prey with [selected?]
+    let candidates prey with [not selected? and not any? chosen with [distance myself <= prey-spacing]]
+    if (not any? candidates)[ error "Too many prey for selected patch size and prey spacing" ]
+    ask one-of candidates [
+      set color 136
+      set size 1
+      set selected? true
+      set present? true
+    ]
+  ]
+  ask prey with [not selected?][ die ]
+end
+
+to add-predator
+  set-default-shape predators "dot"
+  create-predators 1 [
+    setxy random-position random-position
+    set color brown
+    set size 2
+    set search-mode "extensive"
+    set moves-since-capture 0
+    set prey-captured 0
+    if (pen-down?)[ pen-down ]                                         ; if true, the forager's path will be traced; visualization purposes only
+  ]
+end
+
+to-report random-position
+  report wall-min + random-float (wall-max - wall-min)
+end
+
+;; GO ---------------------------------------------------------------------------------------
+;; each tick represents one pause: predator looks for prey, decides on next type of move, and moves
+
+to go
+  ask prey with [not present? and ticks >= regeneration-tick][ regenerate ]
+  ask predators [
+    check-prey
+    update-search-mode
+    move
+  ]
+  tick
+end
+
+to regenerate
+  set color 136
+  set present? true
+end
+
+to check-prey
+  ;; prey are only detected during pauses (saltatory search); at most one prey captured per pause
+  let target-prey prey with [present? and distance myself <= detection-radius]
+  ifelse (any? target-prey)[
+    ask min-one-of target-prey [distance myself][
+      set color black
+      set present? false
+      set regeneration-tick ticks + regeneration-time
+    ]
+    set prey-captured prey-captured + 1
+    set moves-since-capture 0
+  ][
+    set moves-since-capture moves-since-capture + 1
+  ]
+end
+
+to update-search-mode
+  if (search-tactic = "extensive-intensive")[
+    ifelse (prey-captured > 0 and moves-since-capture < giving-up-time)[
+      set search-mode "intensive"
+    ][
+      set search-mode "extensive"
+    ]
+  ]
+  if (search-tactic = "local-density")[
+    let local-density count prey with [present? and distance myself <= response-radius]
+    ifelse (local-density > avg-local-density)[
+      set search-mode "intensive"
+    ][
+      set search-mode "extensive"
+    ]
+  ]
+end
+
+to move
+  ifelse (search-tactic = "random-sampling")[
+    setxy random-position random-position                              ; randomly relocate predator in virtual tank
+  ][
+    let dist draw-move-length search-mode
+    let turn draw-turn-angle search-mode
+    set heading heading + turn
+    move-with-reflection dist
+  ]
+end
+
+to move-with-reflection [ dist ]
+  ;; move dist along current heading; reflect off habitat edges (angle of incidence = angle of reflection)
+  while [dist > 0][
+    let step-x sin heading
+    let step-y cos heading
+    let tx distance-to-wall xcor step-x
+    let ty distance-to-wall ycor step-y
+    let d-wall min list tx ty
+    ifelse (dist < d-wall)[
+      setxy (xcor + dist * step-x) (ycor + dist * step-y)
+      set dist 0
+    ][
+      setxy (clamp (xcor + d-wall * step-x)) (clamp (ycor + d-wall * step-y))
+      set dist dist - d-wall
+      if (tx <= ty)[ set heading (- heading) ]                          ; hit left or right edge
+      if (ty <= tx)[ set heading (180 - heading) ]                      ; hit bottom or top edge (both if corner)
+    ]
+  ]
+end
+
+to-report distance-to-wall [ pos delta ]
+  ;; distance along current heading to the edge of habitat in one dimension
+  if (delta > 0)[ report max list 0 ((wall-max - pos) / delta) ]
+  if (delta < 0)[ report max list 0 ((wall-min - pos) / delta) ]
+  report 1e10                                                           ; moving parallel to edge
+end
+
+to-report clamp [ pos ]
+  report max list wall-min min list wall-max pos
+end
+
+to-report draw-move-length [ mode ]
+  if (mode = "extensive") [ report calc-piecewise random-float 1 ml-extensive move-lengths ]
+  if (mode = "intensive") [ report calc-piecewise random-float 1 ml-intensive move-lengths ]
+  error (word "search mode must be extensive or intensive; not " mode)
+end
+
+to-report draw-turn-angle [ mode ]
+  if (mode = "extensive") [ report calc-piecewise random-float 1 ta-extensive turn-angles ]
+  if (mode = "intensive") [ report calc-piecewise random-float 1 ta-intensive turn-angles ]
+  error (word "search mode must be extensive or intensive; not " mode)
+end
+
+to-report calc-piecewise [#xval #xList #yList]
+  ;; linear interpolation; used here to invert the empirical cumulative distributions
+  ;; https://stackoverflow.com/questions/50506275/table-functions-interpolation-in-netlogo
+  if not (length #xList = length #yList)[ error "mismatched points" ]
+  if #xval <= first #xList [ report first #yList ]
+  if #xval >= last #xList [ report last #yList ]
+  ; binary search for index of first x value that is larger than input x
+  let lo 0
+  let hi length #xList - 1
+  while [hi - lo > 1][
+    let mid floor ((lo + hi) / 2)
+    ifelse (item mid #xList <= #xval)[ set lo mid ][ set hi mid ]
+  ]
+  ; get the xy values bracketing the input x
+  let xlow item lo #xList
+  let xhigh item hi #xList
+  let ylow item lo #yList
+  let yhigh item hi #yList
+  ; interpolate
+  report ylow + ( (#xval - xlow) / (xhigh - xlow) ) * ( yhigh - ylow )
+end
+
+;; Tests ------------------------------------------------------------------------------------
+
+to profile
+  setup                  ;; set up the model
+  profiler:start         ;; start profiling
+  repeat 10000 [ go ]    ;; run something you want to measure
+  profiler:stop          ;; stop profiling
+  print profiler:report  ;; view the results
+  profiler:reset         ;; clear the data
+end
+
+to show-response-radius
+  ;; helper procedure for 'manually' testing model
+  ifelse (search-tactic = "local-density")[
+    ask patches with [pcolor = blue][ set pcolor 99 ]
+    ask predators[
+      ask patches with [pcolor = 99 and distance myself <= response-radius][ set pcolor blue ]
+      print count prey with [present? and distance myself <= response-radius]
+      print search-mode
+    ]
+  ][
+    print "Did you mean to select local-density as the search-tactic?"
+  ]
+end
+
+to show-GUT
+  ifelse (search-tactic = "extensive-intensive")[
+    ask predators [
+      print search-mode
+      print moves-since-capture
+    ]
+  ][
+    print "Did you mean to select extensive-intensive as the search-tactic?"
+  ]
+end
+
+to test-corners
+  setup
+  ask predators [
+    setxy 0.6 0.6
+    set heading 225
+    pen-down
+    move-with-reflection 5
+    print (list xcor ycor heading)
+  ]
+end
+
+to test-random-draws
+  let ml [["Extensive" "Intensive"]]
+  let ta [["Extensive" "Intensive"]]
+  repeat 100000 [
+    set ml lput (list draw-move-length "extensive" draw-move-length "intensive") ml
+    set ta lput (list draw-turn-angle "extensive" draw-turn-angle "intensive") ta
+  ]
+  csv:to-file "MoveLengthTest.csv" ml
+  csv:to-file "TurnAngleTest.csv" ta
+  print "done"
+end]]></code>
+  <widgets>
+    <view x="220" wrappingAllowedX="false" y="15" frameRate="30.0" minPycor="0" height="729" showTickCounter="true" patchSize="10.0" fontSize="10" wrappingAllowedY="false" width="728" tickCounterLabel="moves" maxPycor="71" updateMode="1" maxPxcor="71" minPxcor="0"></view>
+    <button x="25" y="375" height="33" disableUntilTicks="false" forever="false" kind="Observer" width="66" sizeVersion="0">setup</button>
+    <button x="135" y="375" height="33" disableUntilTicks="false" forever="true" kind="Observer" width="63" sizeVersion="0">go</button>
+    <switch x="50" y="430" height="33" on="false" variable="pen-down?" display="pen-down?" width="122" sizeVersion="0"></switch>
+    <note x="25" y="355" height="26" backgroundDark="0" fontSize="11" width="175" markdown="false" textColorLight="-16777216" backgroundLight="0">-------------------------------------------</note>
+    <slider x="20" step="1" y="105" max="70" display="prey-patch-size" height="33" min="5" direction="Horizontal" default="70.0" variable="prey-patch-size" width="172" sizeVersion="0"></slider>
+    <slider x="20" step="1" y="150" max="10" display="prey-spacing" height="33" min="0" direction="Horizontal" default="7.0" variable="prey-spacing" width="172" sizeVersion="0"></slider>
+    <slider x="20" step="1" y="195" max="50" display="prey-number" height="33" min="1" direction="Horizontal" default="49.0" variable="prey-number" width="172" sizeVersion="0"></slider>
+    <slider x="20" step="0.5" y="295" max="9" display="response-radius" height="33" min="1" direction="Horizontal" default="9.0" variable="response-radius" width="172" sizeVersion="0"></slider>
+    <chooser x="20" y="240" height="45" variable="search-tactic" current="3" display="search-tactic" width="175" sizeVersion="0">
+      <choice type="string" value="random-sampling"></choice>
+      <choice type="string" value="extensive-only"></choice>
+      <choice type="string" value="extensive-intensive"></choice>
+      <choice type="string" value="local-density"></choice>
+    </chooser>
+    <switch x="35" y="15" height="33" on="true" variable="use-scenario?" display="use-scenario?" width="142" sizeVersion="0"></switch>
+    <slider x="20" step="1" y="60" max="26" display="scenario" height="33" min="1" direction="Horizontal" default="26.0" variable="scenario" width="172" sizeVersion="0"></slider>
+    <input x="20" multiline="false" y="475" height="60" variable="regeneration-time" type="number" width="172">1000.0</input>
+    <monitor x="20" precision="0" y="545" height="60" fontSize="11" width="172" display="prey captured">sum [prey-captured] of predators</monitor>
+  </widgets>
+  <info><![CDATA[## WHAT IS IT?
+
+A replication of the simulation model of saltatory search by juvenile plaice (*Pleuronectes platessa*) described in Hill, Burrows & Hughes (2003) *Journal of Fish Biology* 63 (Suppl. A): 117–130. A single predator searches a 70 x 70 grid unit habitat (1 grid unit = 1 cm) for prey. Prey sit on lattice points (integer coordinates). The model compares how many prey are captured by four search tactics across 26 artificial prey distributions (Table I in the paper).
+
+## HOW IT WORKS
+
+Each tick is one pause in the predator's search path. During a pause the predator:
+
+1. **Looks for prey.** Prey are only detected during pauses (saltatory search). If any present prey are within `detection-radius` (1 grid unit) of the predator's position, the closest one is captured (100% capture probability, at most one per pause). A captured prey item is absent for `regeneration-time` predator moves and then reappears.
+2. **Chooses the type of its next move** (extensive or intensive) according to `search-tactic`:
+   - **random-sampling**: the predator is relocated to a random position each tick. This is the baseline used to calculate relative efficiency.
+   - **extensive-only**: every move is extensive.
+   - **extensive-intensive**: the 10 moves after a capture (the giving-up time) are intensive; all others are extensive.
+   - **local-density**: the next move is intensive if the number of present prey within `response-radius` (9 or 4.5 in the paper) of the predator exceeds the average number expected in a circle of that size (`prey-number * pi * response-radius ^ 2 / 70 ^ 2`); otherwise it is extensive.
+3. **Moves.** It turns by a random angle and then moves a random distance. Both are drawn from the empirical cumulative distributions for extensive or intensive search (Figs 1 and 2 of the paper; `InputData/MoveLength.csv` and `InputData/TurnAngle.csv`). The predator reflects off the edges of the habitat.
+
+Prey distributions are generated by placing `prey-number` prey at random lattice points within a square patch of side `prey-patch-size` at the center of the habitat. No two prey may be within `prey-spacing` grid units of each other.
+
+## HOW TO USE IT
+
+Turn on `use-scenario?` and pick a `scenario` (1–26) to use the prey distributions in Table I (`InputData/Scenarios.csv`). Turn it off to set `prey-patch-size`, `prey-spacing` and `prey-number` directly. Choose a `search-tactic` (and `response-radius` for local-density), then press setup and go. Turn on `pen-down?` to trace the predator's path.
+
+The BehaviorSpace experiments reproduce the simulation design in the paper: 60 runs of 1,000,000 moves for each combination of tactic and scenario. Run them headlessly with `run-experiments.sh` and summarise the results with `Analysis/analysis.R`.
+
+## THINGS TO NOTICE
+
+The paper states that captured prey were absent for 1000 predator moves. With that value, random sampling captures many fewer prey than shown in Fig. 3 of the paper (e.g., ~19,000 vs ~31,000 per million moves for 49 prey in the homogeneous habitat). The published values are reproduced almost exactly when prey are not depleted (`regeneration-time` = 1). The experiments therefore include both values. See the README for a comparison with the published results.
+
+## IMPLEMENTATION NOTES
+
+Points where the paper is ambiguous and the choices made here:
+
+- The predator's position is continuous (double precision rather than the 10^-5 grid unit resolution in the paper). Detection and local density are measured from the predator's exact position.
+- Local density is counted after any capture in the current pause and determines the next move.
+- A patch of side *s* contains *s* x *s* lattice points, so habitat homogeneity = *s*² / 70² as in Table I.
+- Prey spacing excludes candidate lattice points at a distance less than or equal to `prey-spacing` from an existing prey item. This keeps a spacing of 1 meaningful on an integer lattice.
+- The cumulative distributions were digitized from the published figures. Small digitizing errors (slight decreases and final values above 1) are removed by forcing each curve to be non-decreasing and rescaling it to end at 1. Values are drawn by linear interpolation of the inverse cumulative distribution.
+- The natural prey distributions (Table II, Fig. 5) are not included because the field maps are not available.
+
+## CREDITS AND REFERENCES
+
+Hill, S. L., Burrows, M. T. & Hughes, R. N. (2003). The efficiency of adaptive search tactics for different prey distribution patterns: a simulation model based on the behaviour of juvenile plaice. *Journal of Fish Biology* 63 (Suppl. A), 117–130. https://doi.org/10.1111/j.1095-8649.2003.00212.x
+
+Code hosted on [GitHub](https://github.com/hinkelman/plaice-search-model).]]></info>
+  <turtleShapes>
+    <shape name="default" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="5"></point>
+        <point x="40" y="250"></point>
+        <point x="150" y="205"></point>
+        <point x="260" y="250"></point>
+      </polygon>
+    </shape>
+    <shape name="airplane" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="0"></point>
+        <point x="135" y="15"></point>
+        <point x="120" y="60"></point>
+        <point x="120" y="105"></point>
+        <point x="15" y="165"></point>
+        <point x="15" y="195"></point>
+        <point x="120" y="180"></point>
+        <point x="135" y="240"></point>
+        <point x="105" y="270"></point>
+        <point x="120" y="285"></point>
+        <point x="150" y="270"></point>
+        <point x="180" y="285"></point>
+        <point x="210" y="270"></point>
+        <point x="165" y="240"></point>
+        <point x="180" y="180"></point>
+        <point x="285" y="195"></point>
+        <point x="285" y="165"></point>
+        <point x="180" y="105"></point>
+        <point x="180" y="60"></point>
+        <point x="165" y="15"></point>
+      </polygon>
+    </shape>
+    <shape name="aphid" rotatable="true" editableColorIndex="14">
+      <circle x="96" y="182" marked="true" color="255" diameter="108" filled="true"></circle>
+      <circle x="110" y="127" marked="true" color="255" diameter="80" filled="true"></circle>
+      <circle x="110" y="75" marked="true" color="255" diameter="80" filled="true"></circle>
+      <line endX="80" startY="100" marked="true" color="255" endY="30" startX="150"></line>
+      <line endX="220" startY="100" marked="true" color="255" endY="30" startX="150"></line>
+    </shape>
+    <shape name="arrow" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="0"></point>
+        <point x="0" y="150"></point>
+        <point x="105" y="150"></point>
+        <point x="105" y="293"></point>
+        <point x="195" y="293"></point>
+        <point x="195" y="150"></point>
+        <point x="300" y="150"></point>
+      </polygon>
+    </shape>
+    <shape name="bean aphid" rotatable="true" editableColorIndex="0">
+      <circle x="96" y="182" marked="false" color="255" diameter="108" filled="true"></circle>
+      <circle x="110" y="127" marked="false" color="255" diameter="80" filled="true"></circle>
+      <circle x="110" y="75" marked="false" color="255" diameter="80" filled="true"></circle>
+      <line endX="80" startY="100" marked="false" color="255" endY="30" startX="150"></line>
+      <line endX="220" startY="100" marked="false" color="255" endY="30" startX="150"></line>
+    </shape>
+    <shape name="box" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="285"></point>
+        <point x="285" y="225"></point>
+        <point x="285" y="75"></point>
+        <point x="150" y="135"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="135"></point>
+        <point x="15" y="75"></point>
+        <point x="150" y="15"></point>
+        <point x="285" y="75"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="15" y="75"></point>
+        <point x="15" y="225"></point>
+        <point x="150" y="285"></point>
+        <point x="150" y="135"></point>
+      </polygon>
+      <line endX="150" startY="285" marked="false" color="255" endY="135" startX="150"></line>
+      <line endX="15" startY="135" marked="false" color="255" endY="75" startX="150"></line>
+      <line endX="285" startY="135" marked="false" color="255" endY="75" startX="150"></line>
+    </shape>
+    <shape name="bug" rotatable="true" editableColorIndex="0">
+      <circle x="96" y="182" marked="true" color="-1920102913" diameter="108" filled="true"></circle>
+      <circle x="110" y="127" marked="true" color="-1920102913" diameter="80" filled="true"></circle>
+      <circle x="110" y="75" marked="true" color="-1920102913" diameter="80" filled="true"></circle>
+      <line endX="80" startY="100" marked="true" color="-1920102913" endY="30" startX="150"></line>
+      <line endX="220" startY="100" marked="true" color="-1920102913" endY="30" startX="150"></line>
+    </shape>
+    <shape name="butterfly" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="165"></point>
+        <point x="209" y="199"></point>
+        <point x="225" y="225"></point>
+        <point x="225" y="255"></point>
+        <point x="195" y="270"></point>
+        <point x="165" y="255"></point>
+        <point x="150" y="240"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="165"></point>
+        <point x="89" y="198"></point>
+        <point x="75" y="225"></point>
+        <point x="75" y="255"></point>
+        <point x="105" y="270"></point>
+        <point x="135" y="255"></point>
+        <point x="150" y="240"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="139" y="148"></point>
+        <point x="100" y="105"></point>
+        <point x="55" y="90"></point>
+        <point x="25" y="90"></point>
+        <point x="10" y="105"></point>
+        <point x="10" y="135"></point>
+        <point x="25" y="180"></point>
+        <point x="40" y="195"></point>
+        <point x="85" y="194"></point>
+        <point x="139" y="163"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="162" y="150"></point>
+        <point x="200" y="105"></point>
+        <point x="245" y="90"></point>
+        <point x="275" y="90"></point>
+        <point x="290" y="105"></point>
+        <point x="290" y="135"></point>
+        <point x="275" y="180"></point>
+        <point x="260" y="195"></point>
+        <point x="215" y="195"></point>
+        <point x="162" y="165"></point>
+      </polygon>
+      <polygon color="255" filled="true" marked="false">
+        <point x="150" y="255"></point>
+        <point x="135" y="225"></point>
+        <point x="120" y="150"></point>
+        <point x="135" y="120"></point>
+        <point x="150" y="105"></point>
+        <point x="165" y="120"></point>
+        <point x="180" y="150"></point>
+        <point x="165" y="225"></point>
+      </polygon>
+      <circle x="135" y="90" marked="false" color="255" diameter="30" filled="true"></circle>
+      <line endX="195" startY="105" marked="false" color="255" endY="60" startX="150"></line>
+      <line endX="105" startY="105" marked="false" color="255" endY="60" startX="150"></line>
+    </shape>
+    <shape name="car" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="300" y="180"></point>
+        <point x="279" y="164"></point>
+        <point x="261" y="144"></point>
+        <point x="240" y="135"></point>
+        <point x="226" y="132"></point>
+        <point x="213" y="106"></point>
+        <point x="203" y="84"></point>
+        <point x="185" y="63"></point>
+        <point x="159" y="50"></point>
+        <point x="135" y="50"></point>
+        <point x="75" y="60"></point>
+        <point x="0" y="150"></point>
+        <point x="0" y="165"></point>
+        <point x="0" y="225"></point>
+        <point x="300" y="225"></point>
+        <point x="300" y="180"></point>
+      </polygon>
+      <circle x="180" y="180" marked="false" color="255" diameter="90" filled="true"></circle>
+      <circle x="30" y="180" marked="false" color="255" diameter="90" filled="true"></circle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="162" y="80"></point>
+        <point x="132" y="78"></point>
+        <point x="134" y="135"></point>
+        <point x="209" y="135"></point>
+        <point x="194" y="105"></point>
+        <point x="189" y="96"></point>
+        <point x="180" y="89"></point>
+      </polygon>
+      <circle x="47" y="195" marked="true" color="-1920102913" diameter="58" filled="true"></circle>
+      <circle x="195" y="195" marked="true" color="-1920102913" diameter="58" filled="true"></circle>
+    </shape>
+    <shape name="circle" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+    </shape>
+    <shape name="circle 2" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+      <circle x="30" y="30" marked="false" color="255" diameter="240" filled="true"></circle>
+    </shape>
+    <shape name="cow" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="200" y="193"></point>
+        <point x="197" y="249"></point>
+        <point x="179" y="249"></point>
+        <point x="177" y="196"></point>
+        <point x="166" y="187"></point>
+        <point x="140" y="189"></point>
+        <point x="93" y="191"></point>
+        <point x="78" y="179"></point>
+        <point x="72" y="211"></point>
+        <point x="49" y="209"></point>
+        <point x="48" y="181"></point>
+        <point x="37" y="149"></point>
+        <point x="25" y="120"></point>
+        <point x="25" y="89"></point>
+        <point x="45" y="72"></point>
+        <point x="103" y="84"></point>
+        <point x="179" y="75"></point>
+        <point x="198" y="76"></point>
+        <point x="252" y="64"></point>
+        <point x="272" y="81"></point>
+        <point x="293" y="103"></point>
+        <point x="285" y="121"></point>
+        <point x="255" y="121"></point>
+        <point x="242" y="118"></point>
+        <point x="224" y="167"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="73" y="210"></point>
+        <point x="86" y="251"></point>
+        <point x="62" y="249"></point>
+        <point x="48" y="208"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="25" y="114"></point>
+        <point x="16" y="195"></point>
+        <point x="9" y="204"></point>
+        <point x="23" y="213"></point>
+        <point x="25" y="200"></point>
+        <point x="39" y="123"></point>
+      </polygon>
+    </shape>
+    <shape name="cylinder" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+    </shape>
+    <shape name="dot" rotatable="false" editableColorIndex="0">
+      <circle x="90" y="90" marked="true" color="-1920102913" diameter="120" filled="true"></circle>
+    </shape>
+    <shape name="egg" rotatable="true" editableColorIndex="0">
+      <circle x="105" y="30" marked="false" color="-303222273" diameter="90" filled="true"></circle>
+      <rectangle endX="195" startY="75" marked="false" color="-303222273" endY="240" startX="105" filled="true"></rectangle>
+      <circle x="105" y="195" marked="false" color="-303222273" diameter="90" filled="true"></circle>
+    </shape>
+    <shape name="face happy" rotatable="false" editableColorIndex="0">
+      <circle x="8" y="8" marked="true" color="-1920102913" diameter="285" filled="true"></circle>
+      <circle x="60" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="150" y="255"></point>
+        <point x="90" y="239"></point>
+        <point x="62" y="213"></point>
+        <point x="47" y="191"></point>
+        <point x="67" y="179"></point>
+        <point x="90" y="203"></point>
+        <point x="109" y="218"></point>
+        <point x="150" y="225"></point>
+        <point x="192" y="218"></point>
+        <point x="210" y="203"></point>
+        <point x="227" y="181"></point>
+        <point x="251" y="194"></point>
+        <point x="236" y="217"></point>
+        <point x="212" y="240"></point>
+      </polygon>
+    </shape>
+    <shape name="face neutral" rotatable="false" editableColorIndex="0">
+      <circle x="8" y="7" marked="true" color="-1920102913" diameter="285" filled="true"></circle>
+      <circle x="60" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <rectangle endX="240" startY="195" marked="false" color="255" endY="225" startX="60" filled="true"></rectangle>
+    </shape>
+    <shape name="face sad" rotatable="false" editableColorIndex="0">
+      <circle x="8" y="8" marked="true" color="-1920102913" diameter="285" filled="true"></circle>
+      <circle x="60" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="150" y="168"></point>
+        <point x="90" y="184"></point>
+        <point x="62" y="210"></point>
+        <point x="47" y="232"></point>
+        <point x="67" y="244"></point>
+        <point x="90" y="220"></point>
+        <point x="109" y="205"></point>
+        <point x="150" y="198"></point>
+        <point x="192" y="205"></point>
+        <point x="210" y="220"></point>
+        <point x="227" y="242"></point>
+        <point x="251" y="229"></point>
+        <point x="236" y="206"></point>
+        <point x="212" y="183"></point>
+      </polygon>
+    </shape>
+    <shape name="fish" rotatable="false" editableColorIndex="0">
+      <polygon color="-1" filled="true" marked="false">
+        <point x="44" y="131"></point>
+        <point x="21" y="87"></point>
+        <point x="15" y="86"></point>
+        <point x="0" y="120"></point>
+        <point x="15" y="150"></point>
+        <point x="0" y="180"></point>
+        <point x="13" y="214"></point>
+        <point x="20" y="212"></point>
+        <point x="45" y="166"></point>
+      </polygon>
+      <polygon color="-1" filled="true" marked="false">
+        <point x="135" y="195"></point>
+        <point x="119" y="235"></point>
+        <point x="95" y="218"></point>
+        <point x="76" y="210"></point>
+        <point x="46" y="204"></point>
+        <point x="60" y="165"></point>
+      </polygon>
+      <polygon color="-1" filled="true" marked="false">
+        <point x="75" y="45"></point>
+        <point x="83" y="77"></point>
+        <point x="71" y="103"></point>
+        <point x="86" y="114"></point>
+        <point x="166" y="78"></point>
+        <point x="135" y="60"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="30" y="136"></point>
+        <point x="151" y="77"></point>
+        <point x="226" y="81"></point>
+        <point x="280" y="119"></point>
+        <point x="292" y="146"></point>
+        <point x="292" y="160"></point>
+        <point x="287" y="170"></point>
+        <point x="270" y="195"></point>
+        <point x="195" y="210"></point>
+        <point x="151" y="212"></point>
+        <point x="30" y="166"></point>
+      </polygon>
+      <circle x="215" y="106" marked="false" color="255" diameter="30" filled="true"></circle>
+    </shape>
+    <shape name="flag" rotatable="false" editableColorIndex="0">
+      <rectangle endX="75" startY="15" marked="true" color="-1920102913" endY="300" startX="60" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="90" y="150"></point>
+        <point x="270" y="90"></point>
+        <point x="90" y="30"></point>
+      </polygon>
+      <line endX="90" startY="135" marked="true" color="-1920102913" endY="135" startX="75"></line>
+      <line endX="90" startY="45" marked="true" color="-1920102913" endY="45" startX="75"></line>
+    </shape>
+    <shape name="flower" rotatable="false" editableColorIndex="0">
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="135" y="120"></point>
+        <point x="165" y="165"></point>
+        <point x="180" y="210"></point>
+        <point x="180" y="240"></point>
+        <point x="150" y="300"></point>
+        <point x="165" y="300"></point>
+        <point x="195" y="240"></point>
+        <point x="195" y="195"></point>
+        <point x="165" y="135"></point>
+      </polygon>
+      <circle x="85" y="132" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="130" y="147" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="192" y="85" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="85" y="40" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="177" y="40" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="177" y="132" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="70" y="85" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="130" y="25" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="96" y="51" marked="true" color="-1920102913" diameter="108" filled="true"></circle>
+      <circle x="113" y="68" marked="false" color="255" diameter="74" filled="true"></circle>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="189" y="233"></point>
+        <point x="219" y="188"></point>
+        <point x="249" y="173"></point>
+        <point x="279" y="188"></point>
+        <point x="234" y="218"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="180" y="255"></point>
+        <point x="150" y="210"></point>
+        <point x="105" y="210"></point>
+        <point x="75" y="240"></point>
+        <point x="135" y="240"></point>
+      </polygon>
+    </shape>
+    <shape name="house" rotatable="false" editableColorIndex="0">
+      <rectangle endX="255" startY="120" marked="true" color="-1920102913" endY="285" startX="45" filled="true"></rectangle>
+      <rectangle endX="180" startY="210" marked="false" color="255" endY="285" startX="120" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="15" y="120"></point>
+        <point x="150" y="15"></point>
+        <point x="285" y="120"></point>
+      </polygon>
+      <line endX="270" startY="120" marked="false" color="255" endY="120" startX="30"></line>
+    </shape>
+    <shape name="ladybug" rotatable="true" editableColorIndex="0">
+      <circle x="22" y="22" marked="false" color="-684578305" diameter="256" filled="true"></circle>
+      <circle x="60" y="90" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="90" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="60" y="180" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="180" marked="false" color="255" diameter="60" filled="true"></circle>
+      <line endX="150" startY="30" marked="false" color="255" endY="270" startX="150"></line>
+    </shape>
+    <shape name="ladybug larva" rotatable="true" editableColorIndex="14">
+      <rectangle endX="195" startY="60" marked="true" color="255" endY="240" startX="105" filled="true"></rectangle>
+      <circle x="105" y="15" marked="true" color="255" diameter="90" filled="true"></circle>
+      <circle x="105" y="195" marked="true" color="255" diameter="90" filled="true"></circle>
+      <line endX="225" startY="60" marked="true" color="255" endY="45" startX="195"></line>
+      <line endX="255" startY="105" marked="true" color="255" endY="120" startX="195"></line>
+      <line endX="240" startY="150" marked="true" color="255" endY="180" startX="195"></line>
+      <line endX="105" startY="120" marked="true" color="255" endY="105" startX="45"></line>
+      <line endX="75" startY="60" marked="true" color="255" endY="45" startX="105"></line>
+      <line endX="60" startY="150" marked="true" color="255" endY="180" startX="105"></line>
+    </shape>
+    <shape name="leaf" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="210"></point>
+        <point x="135" y="195"></point>
+        <point x="120" y="210"></point>
+        <point x="60" y="210"></point>
+        <point x="30" y="195"></point>
+        <point x="60" y="180"></point>
+        <point x="60" y="165"></point>
+        <point x="15" y="135"></point>
+        <point x="30" y="120"></point>
+        <point x="15" y="105"></point>
+        <point x="40" y="104"></point>
+        <point x="45" y="90"></point>
+        <point x="60" y="90"></point>
+        <point x="90" y="105"></point>
+        <point x="105" y="120"></point>
+        <point x="120" y="120"></point>
+        <point x="105" y="60"></point>
+        <point x="120" y="60"></point>
+        <point x="135" y="30"></point>
+        <point x="150" y="15"></point>
+        <point x="165" y="30"></point>
+        <point x="180" y="60"></point>
+        <point x="195" y="60"></point>
+        <point x="180" y="120"></point>
+        <point x="195" y="120"></point>
+        <point x="210" y="105"></point>
+        <point x="240" y="90"></point>
+        <point x="255" y="90"></point>
+        <point x="263" y="104"></point>
+        <point x="285" y="105"></point>
+        <point x="270" y="120"></point>
+        <point x="285" y="135"></point>
+        <point x="240" y="165"></point>
+        <point x="240" y="180"></point>
+        <point x="270" y="195"></point>
+        <point x="240" y="210"></point>
+        <point x="180" y="210"></point>
+        <point x="165" y="195"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="195"></point>
+        <point x="135" y="240"></point>
+        <point x="120" y="255"></point>
+        <point x="105" y="255"></point>
+        <point x="105" y="285"></point>
+        <point x="135" y="285"></point>
+        <point x="165" y="240"></point>
+        <point x="165" y="195"></point>
+      </polygon>
+    </shape>
+    <shape name="line" rotatable="true" editableColorIndex="0">
+      <line endX="150" startY="0" marked="true" color="-1920102913" endY="300" startX="150"></line>
+    </shape>
+    <shape name="line half" rotatable="true" editableColorIndex="0">
+      <line endX="150" startY="0" marked="true" color="-1920102913" endY="150" startX="150"></line>
+    </shape>
+    <shape name="pea aphid" rotatable="true" editableColorIndex="0">
+      <circle x="96" y="182" marked="false" color="-528509185" diameter="108" filled="true"></circle>
+      <circle x="110" y="127" marked="false" color="-528509185" diameter="80" filled="true"></circle>
+      <circle x="110" y="75" marked="false" color="-528509185" diameter="80" filled="true"></circle>
+      <line endX="80" startY="100" marked="false" color="-528509185" endY="30" startX="150"></line>
+      <line endX="220" startY="100" marked="false" color="-528509185" endY="30" startX="150"></line>
+    </shape>
+    <shape name="pentagon" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="15"></point>
+        <point x="15" y="120"></point>
+        <point x="60" y="285"></point>
+        <point x="240" y="285"></point>
+        <point x="285" y="120"></point>
+      </polygon>
+    </shape>
+    <shape name="person" rotatable="false" editableColorIndex="0">
+      <circle x="110" y="5" marked="true" color="-1920102913" diameter="80" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="105" y="90"></point>
+        <point x="120" y="195"></point>
+        <point x="90" y="285"></point>
+        <point x="105" y="300"></point>
+        <point x="135" y="300"></point>
+        <point x="150" y="225"></point>
+        <point x="165" y="300"></point>
+        <point x="195" y="300"></point>
+        <point x="210" y="285"></point>
+        <point x="180" y="195"></point>
+        <point x="195" y="90"></point>
+      </polygon>
+      <rectangle endX="172" startY="79" marked="true" color="-1920102913" endY="94" startX="127" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="195" y="90"></point>
+        <point x="240" y="150"></point>
+        <point x="225" y="180"></point>
+        <point x="165" y="105"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="105" y="90"></point>
+        <point x="60" y="150"></point>
+        <point x="75" y="180"></point>
+        <point x="135" y="105"></point>
+      </polygon>
+    </shape>
+    <shape name="plant" rotatable="false" editableColorIndex="0">
+      <rectangle endX="165" startY="90" marked="true" color="-1920102913" endY="300" startX="135" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="255"></point>
+        <point x="90" y="210"></point>
+        <point x="45" y="195"></point>
+        <point x="75" y="255"></point>
+        <point x="135" y="285"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="165" y="255"></point>
+        <point x="210" y="210"></point>
+        <point x="255" y="195"></point>
+        <point x="225" y="255"></point>
+        <point x="165" y="285"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="180"></point>
+        <point x="90" y="135"></point>
+        <point x="45" y="120"></point>
+        <point x="75" y="180"></point>
+        <point x="135" y="210"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="165" y="180"></point>
+        <point x="165" y="210"></point>
+        <point x="225" y="180"></point>
+        <point x="255" y="120"></point>
+        <point x="210" y="135"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="105"></point>
+        <point x="90" y="60"></point>
+        <point x="45" y="45"></point>
+        <point x="75" y="105"></point>
+        <point x="135" y="135"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="165" y="105"></point>
+        <point x="165" y="135"></point>
+        <point x="225" y="105"></point>
+        <point x="255" y="45"></point>
+        <point x="210" y="60"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="90"></point>
+        <point x="120" y="45"></point>
+        <point x="150" y="15"></point>
+        <point x="180" y="45"></point>
+        <point x="165" y="90"></point>
+      </polygon>
+    </shape>
+    <shape name="square" rotatable="false" editableColorIndex="0">
+      <rectangle endX="270" startY="30" marked="true" color="-1920102913" endY="270" startX="30" filled="true"></rectangle>
+    </shape>
+    <shape name="square 2" rotatable="false" editableColorIndex="0">
+      <rectangle endX="270" startY="30" marked="true" color="-1920102913" endY="270" startX="30" filled="true"></rectangle>
+      <rectangle endX="240" startY="60" marked="false" color="255" endY="240" startX="60" filled="true"></rectangle>
+    </shape>
+    <shape name="star" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="151" y="1"></point>
+        <point x="185" y="108"></point>
+        <point x="298" y="108"></point>
+        <point x="207" y="175"></point>
+        <point x="242" y="282"></point>
+        <point x="151" y="216"></point>
+        <point x="59" y="282"></point>
+        <point x="94" y="175"></point>
+        <point x="3" y="108"></point>
+        <point x="116" y="108"></point>
+      </polygon>
+    </shape>
+    <shape name="target" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+      <circle x="30" y="30" marked="false" color="255" diameter="240" filled="true"></circle>
+      <circle x="60" y="60" marked="true" color="-1920102913" diameter="180" filled="true"></circle>
+      <circle x="90" y="90" marked="false" color="255" diameter="120" filled="true"></circle>
+      <circle x="120" y="120" marked="true" color="-1920102913" diameter="60" filled="true"></circle>
+    </shape>
+    <shape name="tree" rotatable="false" editableColorIndex="0">
+      <circle x="118" y="3" marked="true" color="-1920102913" diameter="94" filled="true"></circle>
+      <rectangle endX="180" startY="195" marked="false" color="-1653716737" endY="300" startX="120" filled="true"></rectangle>
+      <circle x="65" y="21" marked="true" color="-1920102913" diameter="108" filled="true"></circle>
+      <circle x="116" y="41" marked="true" color="-1920102913" diameter="127" filled="true"></circle>
+      <circle x="45" y="90" marked="true" color="-1920102913" diameter="120" filled="true"></circle>
+      <circle x="104" y="74" marked="true" color="-1920102913" diameter="152" filled="true"></circle>
+    </shape>
+    <shape name="triangle" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="30"></point>
+        <point x="15" y="255"></point>
+        <point x="285" y="255"></point>
+      </polygon>
+    </shape>
+    <shape name="triangle 2" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="30"></point>
+        <point x="15" y="255"></point>
+        <point x="285" y="255"></point>
+      </polygon>
+      <polygon color="255" filled="true" marked="false">
+        <point x="151" y="99"></point>
+        <point x="225" y="223"></point>
+        <point x="75" y="224"></point>
+      </polygon>
+    </shape>
+    <shape name="truck" rotatable="false" editableColorIndex="0">
+      <rectangle endX="195" startY="45" marked="true" color="-1920102913" endY="187" startX="4" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="296" y="193"></point>
+        <point x="296" y="150"></point>
+        <point x="259" y="134"></point>
+        <point x="244" y="104"></point>
+        <point x="208" y="104"></point>
+        <point x="207" y="194"></point>
+      </polygon>
+      <rectangle endX="195" startY="60" marked="false" color="-1" endY="105" startX="195" filled="true"></rectangle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="238" y="112"></point>
+        <point x="252" y="141"></point>
+        <point x="219" y="141"></point>
+        <point x="218" y="112"></point>
+      </polygon>
+      <circle x="234" y="174" marked="false" color="255" diameter="42" filled="true"></circle>
+      <rectangle endX="214" startY="185" marked="true" color="-1920102913" endY="194" startX="181" filled="true"></rectangle>
+      <circle x="144" y="174" marked="false" color="255" diameter="42" filled="true"></circle>
+      <circle x="24" y="174" marked="false" color="255" diameter="42" filled="true"></circle>
+      <circle x="24" y="174" marked="true" color="-1920102913" diameter="42" filled="false"></circle>
+      <circle x="144" y="174" marked="true" color="-1920102913" diameter="42" filled="false"></circle>
+      <circle x="234" y="174" marked="true" color="-1920102913" diameter="42" filled="false"></circle>
+    </shape>
+    <shape name="turtle" rotatable="true" editableColorIndex="0">
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="215" y="204"></point>
+        <point x="240" y="233"></point>
+        <point x="246" y="254"></point>
+        <point x="228" y="266"></point>
+        <point x="215" y="252"></point>
+        <point x="193" y="210"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="195" y="90"></point>
+        <point x="225" y="75"></point>
+        <point x="245" y="75"></point>
+        <point x="260" y="89"></point>
+        <point x="269" y="108"></point>
+        <point x="261" y="124"></point>
+        <point x="240" y="105"></point>
+        <point x="225" y="105"></point>
+        <point x="210" y="105"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="105" y="90"></point>
+        <point x="75" y="75"></point>
+        <point x="55" y="75"></point>
+        <point x="40" y="89"></point>
+        <point x="31" y="108"></point>
+        <point x="39" y="124"></point>
+        <point x="60" y="105"></point>
+        <point x="75" y="105"></point>
+        <point x="90" y="105"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="132" y="85"></point>
+        <point x="134" y="64"></point>
+        <point x="107" y="51"></point>
+        <point x="108" y="17"></point>
+        <point x="150" y="2"></point>
+        <point x="192" y="18"></point>
+        <point x="192" y="52"></point>
+        <point x="169" y="65"></point>
+        <point x="172" y="87"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="85" y="204"></point>
+        <point x="60" y="233"></point>
+        <point x="54" y="254"></point>
+        <point x="72" y="266"></point>
+        <point x="85" y="252"></point>
+        <point x="107" y="210"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="119" y="75"></point>
+        <point x="179" y="75"></point>
+        <point x="209" y="101"></point>
+        <point x="224" y="135"></point>
+        <point x="220" y="225"></point>
+        <point x="175" y="261"></point>
+        <point x="128" y="261"></point>
+        <point x="81" y="224"></point>
+        <point x="74" y="135"></point>
+        <point x="88" y="99"></point>
+      </polygon>
+    </shape>
+    <shape name="wheel" rotatable="false" editableColorIndex="0">
+      <circle x="3" y="3" marked="true" color="-1920102913" diameter="294" filled="true"></circle>
+      <circle x="30" y="30" marked="false" color="255" diameter="240" filled="true"></circle>
+      <line endX="150" startY="285" marked="true" color="-1920102913" endY="15" startX="150"></line>
+      <line endX="285" startY="150" marked="true" color="-1920102913" endY="150" startX="15"></line>
+      <circle x="120" y="120" marked="true" color="-1920102913" diameter="60" filled="true"></circle>
+      <line endX="79" startY="40" marked="true" color="-1920102913" endY="269" startX="216"></line>
+      <line endX="269" startY="84" marked="true" color="-1920102913" endY="221" startX="40"></line>
+      <line endX="269" startY="216" marked="true" color="-1920102913" endY="79" startX="40"></line>
+      <line endX="221" startY="40" marked="true" color="-1920102913" endY="269" startX="84"></line>
+    </shape>
+    <shape name="x" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="270" y="75"></point>
+        <point x="225" y="30"></point>
+        <point x="30" y="225"></point>
+        <point x="75" y="270"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="30" y="75"></point>
+        <point x="75" y="30"></point>
+        <point x="270" y="225"></point>
+        <point x="225" y="270"></point>
+      </polygon>
+    </shape>
+  </turtleShapes>
+  <linkShapes>
+    <shape name="default" curviness="0.0">
+      <lines>
+        <line x="-0.2" visible="false">
+          <dash value="0.0"></dash>
+          <dash value="1.0"></dash>
+        </line>
+        <line x="0.0" visible="true">
+          <dash value="1.0"></dash>
+          <dash value="0.0"></dash>
+        </line>
+        <line x="0.2" visible="false">
+          <dash value="0.0"></dash>
+          <dash value="1.0"></dash>
+        </line>
+      </lines>
+      <indicator>
+        <shape name="link direction" rotatable="true" editableColorIndex="0">
+          <line endX="90" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line>
+          <line endX="210" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line>
+        </shape>
+      </indicator>
+    </shape>
+  </linkShapes>
+  <previewCommands>setup repeat 75 [ go ]</previewCommands>
+  <experiments>
+    <experiment name="random-sampling" repetitions="60" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="1000">
+      <setup>setup</setup>
+      <go>repeat 1000 [ go ]</go>
+      <metrics>
+        <metric>ticks</metric>
+        <metric>sum [prey-captured] of predators</metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="use-scenario?">
+          <value value="true"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="search-tactic">
+          <value value="&quot;random-sampling&quot;"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="pen-down?">
+          <value value="false"></value>
+        </enumeratedValueSet>
+        <steppedValueSet variable="scenario" first="1" step="1" last="26"></steppedValueSet>
+        <enumeratedValueSet variable="regeneration-time">
+          <value value="1000"></value>
+          <value value="1"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="response-radius">
+          <value value="9"></value>
+        </enumeratedValueSet>
+      </constants>
+    </experiment>
+    <experiment name="extensive-only" repetitions="60" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="1000">
+      <setup>setup</setup>
+      <go>repeat 1000 [ go ]</go>
+      <metrics>
+        <metric>ticks</metric>
+        <metric>sum [prey-captured] of predators</metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="use-scenario?">
+          <value value="true"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="search-tactic">
+          <value value="&quot;extensive-only&quot;"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="pen-down?">
+          <value value="false"></value>
+        </enumeratedValueSet>
+        <steppedValueSet variable="scenario" first="1" step="1" last="26"></steppedValueSet>
+        <enumeratedValueSet variable="regeneration-time">
+          <value value="1000"></value>
+          <value value="1"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="response-radius">
+          <value value="9"></value>
+        </enumeratedValueSet>
+      </constants>
+    </experiment>
+    <experiment name="extensive-intensive" repetitions="60" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="1000">
+      <setup>setup</setup>
+      <go>repeat 1000 [ go ]</go>
+      <metrics>
+        <metric>ticks</metric>
+        <metric>sum [prey-captured] of predators</metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="use-scenario?">
+          <value value="true"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="search-tactic">
+          <value value="&quot;extensive-intensive&quot;"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="pen-down?">
+          <value value="false"></value>
+        </enumeratedValueSet>
+        <steppedValueSet variable="scenario" first="1" step="1" last="26"></steppedValueSet>
+        <enumeratedValueSet variable="regeneration-time">
+          <value value="1000"></value>
+          <value value="1"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="response-radius">
+          <value value="9"></value>
+        </enumeratedValueSet>
+      </constants>
+    </experiment>
+    <experiment name="local-density" repetitions="60" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="1000">
+      <setup>setup</setup>
+      <go>repeat 1000 [ go ]</go>
+      <metrics>
+        <metric>ticks</metric>
+        <metric>sum [prey-captured] of predators</metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="use-scenario?">
+          <value value="true"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="search-tactic">
+          <value value="&quot;local-density&quot;"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="pen-down?">
+          <value value="false"></value>
+        </enumeratedValueSet>
+        <steppedValueSet variable="scenario" first="1" step="1" last="26"></steppedValueSet>
+        <enumeratedValueSet variable="regeneration-time">
+          <value value="1000"></value>
+          <value value="1"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="response-radius">
+          <value value="4.5"></value>
+          <value value="9"></value>
+        </enumeratedValueSet>
+      </constants>
+    </experiment>
+  </experiments>
+</model>
