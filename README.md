@@ -19,7 +19,7 @@ NetLogo 7.0.4
 Rscript Analysis/analysis.R
 ```
 
-The full design (4 search tactics, 26 prey distributions, 2 regeneration times, 60 runs of 1,000,000 moves) takes about 5 hours on 8 cores. The R script needs dplyr, tidyr, readr and ggplot2.
+The full design (4 search tactics plus an extra response radius, 26 prey distributions, 2 regeneration times, 60 runs of 1,000,000 moves) takes about 6 hours on 8 cores. The R script needs dplyr, tidyr, readr and ggplot2.
 
 ## Results
 
@@ -59,5 +59,42 @@ It does not reproduce:
 - **Local density at r = 4.5.** In the paper it is clearly less efficient than r = 9 in heterogeneous habitats. In the model the two radii are nearly identical in group A without depletion.
 - **Local density (r = 9) in group D with 20 or more prey.** The model gives ~1.00 vs 1.10–1.17 published. With prey spacing of 7–10 grid units, the circle of radius 9 rarely holds more prey than the threshold (1.0–2.5 prey), so the predator almost never switches to intensive search.
 
-These remaining differences all involve the local-density rule. The paper does not fully specify that rule: when density is assessed relative to capture, how the threshold is computed, or what "compared integer values of prey density" means. Rounding the threshold to the nearest integer was tested and made the fit worse.
+These remaining differences all involve the local-density rule, which the paper does not fully specify.
 
+### Local-density rule
+
+Several alternative readings of the rule were tested (8 runs of each scenario, regeneration time = 1):
+
+| Variant | Effect on fit to published values |
+|---|---|
+| Density measured at the pause before the previous one (one-move lag) | Much worse (e.g., 1.69 vs 1.33 in the smallest patch) |
+| Density counted before rather than after a capture | No change |
+| Density counted from the lattice point nearest the predator | No change |
+| Threshold averaged over all habitat positions (circles truncated at edges) | Improves one scenario (20 prey, group D) only |
+| Threshold rounded down to an integer; intensive if count ≥ threshold | Worse |
+| Threshold rounded to the nearest integer | Worse |
+
+The one reading that substantially improves the fit is that **the published response radii (9 and 4.5 grid units) are circle diameters**. That is, the paper's "r = 9" corresponds to a radius of 4.5 and its "r = 4.5" to a radius of 2.25. The full design was run with radius 2.25 (experiment `local-density-r2.25`); radius 4.5 was already in the `local-density` experiment. Root mean square difference from published values with regeneration time = 1 (`Analysis/LocalDensityFit.csv`):
+
+| Published tactic | Group | As radius | As diameter |
+|---|---|---|---|
+| local-density (r = 9) | A | 0.093 | 0.069 |
+| local-density (r = 9) | B | **0.046** | 0.089 |
+| local-density (r = 9) | C | 0.092 | 0.063 |
+| local-density (r = 9) | D | 0.116 | **0.025** |
+| local-density (r = 4.5) | A | 0.146 | **0.045** |
+| All local-density | | 0.106 | **0.061** |
+
+![Relative efficiency, diameter interpretation](Analysis/Fig4-relative-efficiency-diameter.png)
+
+Under the diameter interpretation:
+
+- **Group D** is reproduced (1.27, 1.24, 1.19, 1.14, 1.12, 1.09 vs published 1.25, 1.29, 1.17, 1.16, 1.13, 1.10). With a radius of 9, the threshold exceeds one prey for 20 or more prey, and efficiency collapses to ~1.00. With a radius of 4.5 it stays below one prey.
+- **The two response radii are ordered as in the paper.** The smaller one is clearly less efficient in heterogeneous habitats (group A). With the stated radii the two were nearly identical.
+
+It does not explain:
+
+- **The most heterogeneous habitats (group A, smallest patches).** The paper's local density (r = 9) is ~0.1 lower than the model and less efficient than extensive–intensive.
+- **Group B with few prey.** The fit gets worse (1.32 vs 1.48 published at 5 prey), and efficiency increases with prey abundance where the paper's decreases.
+
+The paper explicitly says "radius", so this is a plausible explanation rather than a confirmed one. For the smallest patches, the paper attributes the lower efficiency to intensive search starting before the predator reaches the patch. The model shows this effect, but more weakly than the paper.

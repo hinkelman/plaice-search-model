@@ -80,6 +80,27 @@ fit_rs <- rs_out |>
 print(as.data.frame(fit))
 print(as.data.frame(fit_rs))
 
+# alternative interpretation: response "radius" values in the paper (9, 4.5) are circle diameters,
+# i.e., the paper's r = 9 corresponds to model radius 4.5 and the paper's r = 4.5 to model radius 2.25
+diameter_map <- c("local-density (r = 4.5)" = "local-density (r = 9)",
+                  "local-density (r = 2.25)" = "local-density (r = 4.5)")
+eff_diam <- eff |>
+  filter(Tactic %in% names(diameter_map)) |>
+  mutate(ModelTactic = Tactic, Tactic = unname(diameter_map[Tactic])) |>
+  left_join(rename(paper4, PaperRelativeEfficiency = RelativeEfficiency),
+            by = c("Scenario", "Tactic"))
+fit_diam <- bind_rows(
+  eff_out |> filter(grepl("local-density", Tactic), Tactic != "local-density (r = 2.25)") |>
+    mutate(Interpretation = "radius"),
+  eff_diam |> mutate(Interpretation = "diameter")) |>
+  filter(!is.na(PaperRelativeEfficiency)) |>
+  group_by(RegenerationTime, Interpretation, Tactic, Group) |>
+  summarise(RMSD = sqrt(mean((RelativeEfficiency - PaperRelativeEfficiency)^2)), .groups = "drop") |>
+  pivot_wider(names_from = Group, values_from = RMSD) |>
+  arrange(RegenerationTime, Tactic, desc(Interpretation))
+write_csv(fit_diam, "Analysis/LocalDensityFit.csv")
+print(as.data.frame(fit_diam), digits = 3)
+
 ## Figures ------------------------------------------------------------------------------------
 
 regen_lab <- function(x) paste("Regeneration time =", x, "moves")
@@ -104,6 +125,7 @@ fig3 <- rs_out |>
 ggsave("Analysis/Fig3-random-sampling.png", fig3, width = 9, height = 6, dpi = 150)
 
 fig4 <- eff_out |>
+  filter(Tactic %in% tactic_levels) |>
   mutate(Tactic = factor(Tactic, levels = tactic_levels),
          x = ifelse(Group == "A", PreyPatchSize^2 / grid_area, PreyNumber / grid_area)) |>
   ggplot(aes(x = x, colour = Tactic, shape = Tactic)) +
@@ -121,3 +143,24 @@ fig4 <- eff_out |>
   theme_bw() +
   theme(legend.position = "bottom")
 ggsave("Analysis/Fig4-relative-efficiency.png", fig4, width = 14, height = 8, dpi = 150)
+
+fig4_diam <- bind_rows(
+  eff_out |> filter(Tactic %in% c("extensive-only", "extensive-intensive")),
+  eff_diam) |>
+  mutate(Tactic = factor(Tactic, levels = tactic_levels),
+         x = ifelse(Group == "A", PreyPatchSize^2 / grid_area, PreyNumber / grid_area)) |>
+  ggplot(aes(x = x, colour = Tactic, shape = Tactic)) +
+  geom_hline(yintercept = 1, linetype = "dashed", colour = "grey50") +
+  geom_line(aes(y = RelativeEfficiency)) +
+  geom_errorbar(aes(ymin = Lower, ymax = Upper), width = 0) +
+  geom_point(aes(y = PaperRelativeEfficiency), size = 2.5, alpha = 0.8, stroke = 1) +
+  scale_shape_manual(values = c(1, 15, 17, 4)) +
+  facet_grid(RegenerationTime ~ Group, scales = "free_x",
+             labeller = labeller(RegenerationTime = regen_lab, Group = group_lab)) +
+  labs(x = "Habitat homogeneity (group A) or habitat prey density (prey per grid unit²; groups B-D)",
+       y = "Relative efficiency",
+       title = "Relative efficiency with response radius interpreted as a diameter",
+       subtitle = "Paper's r = 9 compared with model radius 4.5; paper's r = 4.5 with model radius 2.25. Lines with 95% CI = this model; symbols = published values") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+ggsave("Analysis/Fig4-relative-efficiency-diameter.png", fig4_diam, width = 14, height = 8, dpi = 150)

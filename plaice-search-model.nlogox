@@ -359,7 +359,7 @@ end]]></code>
     <slider x="20" step="1" y="105" max="70" display="prey-patch-size" height="33" min="5" direction="Horizontal" default="70.0" variable="prey-patch-size" width="172" sizeVersion="0"></slider>
     <slider x="20" step="1" y="150" max="10" display="prey-spacing" height="33" min="0" direction="Horizontal" default="7.0" variable="prey-spacing" width="172" sizeVersion="0"></slider>
     <slider x="20" step="1" y="195" max="50" display="prey-number" height="33" min="1" direction="Horizontal" default="49.0" variable="prey-number" width="172" sizeVersion="0"></slider>
-    <slider x="20" step="0.5" y="295" max="9" display="response-radius" height="33" min="1" direction="Horizontal" default="9.0" variable="response-radius" width="172" sizeVersion="0"></slider>
+    <slider x="20" step="0.25" y="295" max="9" display="response-radius" height="33" min="1" direction="Horizontal" default="9.0" variable="response-radius" width="172" sizeVersion="0"></slider>
     <chooser x="20" y="240" height="45" variable="search-tactic" current="3" display="search-tactic" width="175" sizeVersion="0">
       <choice type="string" value="random-sampling"></choice>
       <choice type="string" value="extensive-only"></choice>
@@ -1277,6 +1277,33 @@ Code hosted on [GitHub](https://github.com/hinkelman/plaice-search-model).]]></i
         <enumeratedValueSet variable="response-radius">
           <value value="4.5"></value>
           <value value="9"></value>
+        </enumeratedValueSet>
+      </constants>
+    </experiment>
+    <experiment name="local-density-r2.25" repetitions="60" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="1000">
+      <setup>setup</setup>
+      <go>repeat 1000 [ go ]</go>
+      <metrics>
+        <metric>ticks</metric>
+        <metric>sum [prey-captured] of predators</metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="use-scenario?">
+          <value value="true"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="search-tactic">
+          <value value="&quot;local-density&quot;"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="pen-down?">
+          <value value="false"></value>
+        </enumeratedValueSet>
+        <steppedValueSet variable="scenario" first="1" step="1" last="26"></steppedValueSet>
+        <enumeratedValueSet variable="regeneration-time">
+          <value value="1000"></value>
+          <value value="1"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="response-radius">
+          <value value="2.25"></value>
         </enumeratedValueSet>
       </constants>
     </experiment>

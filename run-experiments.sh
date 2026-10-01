@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run the BehaviorSpace experiments headlessly with NetLogo 7.0.4.
-# Usage: ./run-experiments.sh [experiment ...]   (default: all four experiments)
+# Usage: ./run-experiments.sh [experiment ...]   (default: all experiments)
 # Results are written to Results/<experiment>.csv
 # Full design (4 experiments, 60 reps, 1,000,000 moves per run) takes several hours.
 
@@ -13,7 +13,7 @@ mkdir -p Results
 
 EXPERIMENTS=("$@")
 if [ ${#EXPERIMENTS[@]} -eq 0 ]; then
-  EXPERIMENTS=(random-sampling extensive-only extensive-intensive local-density)
+  EXPERIMENTS=(random-sampling extensive-only extensive-intensive local-density local-density-r2.25)
 fi
 
 for exp in "${EXPERIMENTS[@]}"; do
