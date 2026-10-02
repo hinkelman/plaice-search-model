@@ -19,11 +19,11 @@ NetLogo 7.0.4
 Rscript Analysis/analysis.R
 ```
 
-The full design (4 search tactics plus an extra response radius, 26 prey distributions, 2 regeneration times, 60 runs of 1,000,000 moves) takes about 6 hours on 8 cores. The R script needs dplyr, tidyr, readr and ggplot2.
+The full design (4 search tactics plus an extra response radius, 26 prey distributions, 2 regeneration times, with and without prey spacing, 60 runs of 1,000,000 moves) takes about 11 hours on 8 cores. The R script needs dplyr, tidyr, readr and ggplot2.
 
 ## Results
 
-Output from the full design is in `Results/`, summarised in `Analysis/RandomSampling.csv` and `Analysis/RelativeEfficiency.csv`. Relative efficiency is mean prey captured divided by mean prey captured by random sampling of the same grid. Published values were read by eye from the figures, so treat them as accurate to about ±0.01–0.02 (Fig. 4) or ±500 prey (Fig. 3). The natural prey distributions (Table II, Fig. 5) cannot be replicated because the field maps are not available.
+Output from the full design is in `Results/`, summarised in `Analysis/RandomSampling.csv` and `Analysis/RelativeEfficiency.csv`. Fit to the published values is in `Analysis/FitRandomSampling.csv` and `Analysis/FitRelativeEfficiency.csv`. Relative efficiency is mean prey captured divided by mean prey captured by random sampling of the same grid. Published values were read by eye from the figures, so treat them as accurate to about ±0.01–0.02 (Fig. 4) or ±500 prey (Fig. 3). The natural prey distributions (Table II, Fig. 5) cannot be replicated because the field maps are not available.
 
 ![Random sampling](Analysis/Fig3-random-sampling.png)
 
@@ -74,7 +74,7 @@ Several alternative readings of the rule were tested (8 runs of each scenario, r
 | Threshold rounded down to an integer; intensive if count ≥ threshold | Worse |
 | Threshold rounded to the nearest integer | Worse |
 
-The one reading that substantially improves the fit is that **the published response radii (9 and 4.5 grid units) are circle diameters**. That is, the paper's "r = 9" corresponds to a radius of 4.5 and its "r = 4.5" to a radius of 2.25. The full design was run with radius 2.25 (experiment `local-density-r2.25`); radius 4.5 was already in the `local-density` experiment. Root mean square difference from published values with regeneration time = 1 (`Analysis/LocalDensityFit.csv`):
+The one reading that substantially improves the fit is that **the published response radii (9 and 4.5 grid units) are circle diameters**. That is, the paper's "r = 9" corresponds to a radius of 4.5 and its "r = 4.5" to a radius of 2.25. The full design was run with radius 2.25 (experiment `local-density-r2.25`); radius 4.5 was already in the `local-density` experiment. Root mean square difference from published values with regeneration time = 1 (`Analysis/FitRelativeEfficiency.csv`):
 
 | Published tactic | Group | As radius | As diameter |
 |---|---|---|---|
@@ -98,3 +98,33 @@ It does not explain:
 - **Group B with few prey.** The fit gets worse (1.32 vs 1.48 published at 5 prey), and efficiency increases with prey abundance where the paper's decreases.
 
 The paper explicitly says "radius", so this is a plausible explanation rather than a confirmed one. For the smallest patches, the paper attributes the lower efficiency to intensive search starting before the predator reaches the patch. The model shows this effect, but more weakly than the paper.
+
+### Prey spacing
+
+Table I gives a minimum spacing between prey for most scenarios. The published random-sampling results (Fig. 3) indicate that this spacing was not applied, or had little effect, in the original simulations. With a minimum spacing of 2 or more grid units, the detection circles (radius 1) around prey cannot overlap. Random sampling should then capture the same number of prey in group B as in group D, which has the same prey numbers. The paper shows group B clearly lower (e.g., ~17,500 vs ~19,000 for 30 prey). That is only possible if prey were close enough for their detection circles to overlap. Similarly, scenario 14 (49 prey, spacing 1) captured the same as scenario 20 (49 prey, no spacing).
+
+The `enforce-spacing?` switch places prey at random lattice points within the patch, ignoring `prey-spacing`. The full design was rerun with spacing off (experiments with the suffix `-no-spacing`; only the 18 scenarios with nonzero spacing are affected). With regeneration time = 1:
+
+| | Spacing enforced | No spacing |
+|---|---|---|
+| Random sampling: mean absolute difference from Fig. 3 | 4.3% | **2.2%** |
+| Extensive–intensive: RMSD | 0.023 | **0.018** |
+| Local density (r = 9, as radius): RMSD | 0.091 | **0.079** |
+| Local density (r = 9, as radius), group D: RMSD | 0.116 | **0.065** |
+| All local density, as radius: RMSD | 0.106 | 0.105 |
+| All local density, as diameter: RMSD | **0.061** | 0.067 |
+
+![Random sampling, no prey spacing](Analysis/Fig3-random-sampling-no-spacing.png)
+
+![Relative efficiency, no prey spacing](Analysis/Fig4-relative-efficiency-no-spacing.png)
+
+Without spacing:
+
+- **Random sampling matches Fig. 3 more closely.** The mean difference falls from +2.5% to +0.3%. Groups A and B are within ~3% of the published values.
+- **Extensive–intensive improves** in groups A, B and D. Group D is 1.04 vs 1.03–1.04 published.
+- **Local density (r = 9) in group D is reproduced with the stated radius** for 20 or more prey (1.17, 1.16, 1.13, 1.13 vs 1.17, 1.155, 1.13, 1.10). Random placement creates small clusters of prey that exceed the threshold; regularly spaced prey almost never do. The collapse to ~1.00 with spacing enforced was therefore a consequence of the spacing rule, not of the radius.
+- **Local density remains too efficient where prey are few or clustered:** the smallest patches in group A (1.52 vs 1.33), group C (0.05–0.11 too high) and 5 prey in group D (1.41 vs 1.25).
+- **Local density at r = 4.5 is still 0.12–0.24 too high in group A.** The model's r = 4.5 and r = 9 behave similarly; in the paper r = 4.5 is clearly less efficient. Reading the published radii as diameters still fits group A better, with or without spacing.
+
+The no-depletion, no-spacing version of the model is the closest match to the published random-sampling and extensive–intensive results. No single version of the local-density rule tested here reproduces all of the published local-density results.
+

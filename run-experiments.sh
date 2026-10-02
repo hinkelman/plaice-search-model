@@ -13,7 +13,8 @@ mkdir -p Results
 
 EXPERIMENTS=("$@")
 if [ ${#EXPERIMENTS[@]} -eq 0 ]; then
-  EXPERIMENTS=(random-sampling extensive-only extensive-intensive local-density local-density-r2.25)
+  EXPERIMENTS=(random-sampling extensive-only extensive-intensive local-density local-density-r2.25
+               random-sampling-no-spacing extensive-only-no-spacing extensive-intensive-no-spacing local-density-no-spacing)
 fi
 
 for exp in "${EXPERIMENTS[@]}"; do
